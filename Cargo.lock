@@ -116,6 +116,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "au"
+version = "0.1.0"
+source = "git+ssh://git@github.com/wavey-ai/au.git#4f10411371116bd006eeb50d11334e0ec7803eeb"
+dependencies = [
+ "bytes",
+ "chrono",
+ "h264",
+ "serde",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -523,6 +534,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "h264"
+version = "0.1.0"
+source = "git+https://github.com/wavey-ai/av-rs.git#e608602624f22a89a2d78da5b1d3b13c79bbf884"
+dependencies = [
+ "bytes",
+ "memchr",
+]
+
+[[package]]
 name = "h3"
 version = "0.0.4"
 source = "git+https://github.com/hyperium/h3.git#b44edeb60d234d49c45828395108f7519a048d4b"
@@ -853,10 +873,15 @@ dependencies = [
 [[package]]
 name = "mem3u8"
 version = "0.1.0"
+source = "git+ssh://git@github.com/wavey-ai/mem3u8.git#cef11133554919c27771f7f1e12861cc6162d17f"
 dependencies = [
+ "au",
  "bytes",
  "chrono",
  "flate2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
  "xxhash-rust",
 ]
 
