@@ -24,13 +24,11 @@ quinn = { version = "0.10", default-features = false, features = [
 ] }
 rustls = { version = "0.21.0", features = ["quic"] }
 h2 = "0.4.3"
-rustls-pemfile = "2"
 xxhash-rust = { version = "0.8.10", features = ["xxh3", "const_xxh3"] }
 h3 = { git = "https://github.com/hyperium/h3.git", rev = "eb79204" }
 h3-quinn = { git = "https://github.com/hyperium/h3.git", rev = "eb79204" }
 h3-webtransport = { git = "https://github.com/hyperium/h3.git", rev = "eb79204" }
 mem3u8 = { git = "ssh://git@github.com/wavey-ai/mem3u8.git" }
-pki-types = { package = "rustls-pki-types", version = "1.4.1" }
 tls-helpers = { path = "../tls-helpers" }
 
 [profile.release]

@@ -18,15 +18,11 @@ use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
-use pki_types::{CertificateDer, PrivateKeyDer};
 use regex::Regex;
-use rustls_pemfile::{certs, pkcs8_private_keys};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::{fs::File, io, io::BufReader};
 use tls_helpers::{certs_from_base64, privkey_from_base64, tls_acceptor_from_base64};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -40,7 +36,6 @@ pub struct HyperHls {
     cert_pem_base64: String,
     privkey_pem_base64: String,
     ssl_port: u16,
-    node_name: String,
     fmp4_cache: Arc<RingBuffer>,
     m3u8_cache: Arc<Store>,
 }
@@ -52,7 +47,6 @@ impl HyperHls {
         ssl_port: u16,
         fmp4_cache: Arc<RingBuffer>,
         m3u8_cache: Arc<Store>,
-        node_name: String,
     ) -> Self {
         Self {
             cert_pem_base64,
@@ -60,7 +54,6 @@ impl HyperHls {
             ssl_port,
             fmp4_cache,
             m3u8_cache,
-            node_name,
         }
     }
 
@@ -570,17 +563,6 @@ fn add_cors_headers(res: &mut http::Response<http_body_util::Full<Bytes>>) {
         "access-control-allow-headers",
         "Content-Type".parse().unwrap(),
     );
-}
-
-fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    certs(&mut BufReader::new(File::open(path)?)).collect()
-}
-
-fn load_keys(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
-    pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-        .next()
-        .unwrap()
-        .map(Into::into)
 }
 
 macro_rules! log_result {
