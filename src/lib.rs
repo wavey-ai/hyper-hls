@@ -20,7 +20,6 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
 use pki_types::{CertificateDer, PrivateKeyDer};
 use regex::Regex;
-use rustls::{Certificate, PrivateKey};
 use rustls_pemfile::{certs, pkcs8_private_keys};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -28,17 +27,18 @@ use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::{fs::File, io, io::BufReader};
+use tls_helpers::{certs_from_base64, privkey_from_base64, tls_acceptor_from_base64};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::pin;
 use tokio::sync::watch;
 use tokio::time::{sleep, Duration, Instant};
-use tokio_rustls::TlsAcceptor;
 use tracing::{error, info};
 use xxhash_rust::const_xxh3::xxh3_64 as const_xxh3;
 
 pub struct HyperHls {
-    ssl_path: String,
+    cert_pem_base64: String,
+    privkey_pem_base64: String,
     ssl_port: u16,
     node_name: String,
     fmp4_cache: Arc<RingBuffer>,
@@ -47,14 +47,16 @@ pub struct HyperHls {
 
 impl HyperHls {
     pub fn new(
-        ssl_path: String,
+        cert_pem_base64: String,
+        privkey_pem_base64: String,
         ssl_port: u16,
         fmp4_cache: Arc<RingBuffer>,
         m3u8_cache: Arc<Store>,
         node_name: String,
     ) -> Self {
         Self {
-            ssl_path,
+            cert_pem_base64,
+            privkey_pem_base64,
             ssl_port,
             fmp4_cache,
             m3u8_cache,
@@ -69,22 +71,9 @@ impl HyperHls {
 
         {
             let addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), self.ssl_port);
-
-            let crt_path = format!("{}/{}", self.ssl_path, "cert.pem");
-            let key_path = format!("{}/{}", self.ssl_path, "privkey.pem");
-
-            let crt_path = Path::new(&crt_path);
-            let key_path = Path::new(&key_path);
-
-            let certs = load_certs(crt_path).unwrap();
-            let key = load_keys(key_path).unwrap();
-
-            let mut server_config = tokio_rustls::rustls::ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(certs, key)?;
-            server_config.alpn_protocols =
-                vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"http/1.0".to_vec()];
-            let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
+            vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"http/1.0".to_vec()];
+            let tls_acceptor =
+                tls_acceptor_from_base64(&self.cert_pem_base64, &self.privkey_pem_base64)?;
 
             println!("Starting to serve on https://{}", addr);
             let ssl_port = self.ssl_port;
@@ -138,18 +127,15 @@ impl HyperHls {
             tokio::spawn(srv_h2);
         }
 
-        let certs =
-            Certificate(std::fs::read(format!("{}/{}", self.ssl_path, "cert.der")).unwrap());
-        let key =
-            PrivateKey(std::fs::read(format!("{}/{}", self.ssl_path, "privkey.der")).unwrap());
-
+        let certs = certs_from_base64(&self.cert_pem_base64)?;
+        let key = privkey_from_base64(&self.privkey_pem_base64)?;
         let mut tls_config = rustls::ServerConfig::builder()
             .with_safe_default_cipher_suites()
             .with_safe_default_kx_groups()
             .with_protocol_versions(&[&rustls::version::TLS13])
             .unwrap()
             .with_no_client_auth()
-            .with_single_cert(vec![certs], key)
+            .with_single_cert(certs, key)
             .unwrap();
 
         tls_config.max_early_data_size = u32::MAX;
