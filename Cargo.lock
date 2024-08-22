@@ -150,16 +150,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "au"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "chrono",
- "h264",
- "serde",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1610,6 +1600,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "rml_amf0"
+version = "0.3.0"
+source = "git+https://github.com/wavey-ai/rust-media-libs.git#02522b540693a2e2b02eb2d730ed70fd78ebcf36"
+dependencies = [
+ "byteorder",
+ "thiserror",
+]
+
+[[package]]
+name = "rml_rtmp"
+version = "0.8.0"
+source = "git+https://github.com/wavey-ai/rust-media-libs.git#02522b540693a2e2b02eb2d730ed70fd78ebcf36"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "hmac",
+ "rand 0.8.5",
+ "rml_amf0",
+ "serde",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1772,6 +1786,17 @@ name = "sha-1"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5058ada175748e33390e40e872bd0fe59a19f265d0158daa551c5a88a76009c"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
+]
+
+[[package]]
+name = "sha2"
+version = "0.10.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "793db75ad2bcafc3ffa7c68b215fee268f537982cd901d132f89c6343f3a3dc8"
 dependencies = [
  "cfg-if",
  "cpufeatures",
@@ -2033,7 +2058,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tls-helpers"
-version = "0.1.2"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07ebf0c0cfa4d03eb3b01317893f43aa1a5c6aebca8eecbd5ebcc10286a5273b"
 dependencies = [
  "base64",
  "rustls 0.21.12",
@@ -2266,7 +2293,6 @@ name = "ts"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "au",
  "byteorder",
  "bytes",
  "chrono",
@@ -2276,6 +2302,7 @@ dependencies = [
  "mpeg2",
  "mpeg2ts-reader",
  "mse_fmp4",
+ "rml_rtmp",
  "srt-tokio",
  "tokio",
  "tokio-stream",
