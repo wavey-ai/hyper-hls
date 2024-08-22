@@ -10,7 +10,7 @@ use h3_webtransport::{
     server::{self, WebTransportSession},
     stream,
 };
-use mem3u8::{cache::RingBuffer, store::Store};
+use ts::playlist::{RingBuffer, Store};
 
 use http::{Method, Response, StatusCode};
 use http_body_util::Full;
@@ -64,9 +64,12 @@ impl HyperHls {
 
         {
             let addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), self.ssl_port);
-            vec![b"h2".to_vec(), b"http/1.1".to_vec(), b"http/1.0".to_vec()];
-            let tls_acceptor =
-                tls_acceptor_from_base64(&self.cert_pem_base64, &self.privkey_pem_base64)?;
+            let tls_acceptor = tls_acceptor_from_base64(
+                &self.cert_pem_base64,
+                &self.privkey_pem_base64,
+                false,
+                true,
+            )?;
 
             println!("Starting to serve on https://{}", addr);
             let ssl_port = self.ssl_port;
