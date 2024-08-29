@@ -59,9 +59,19 @@ impl HyperHls {
 
     pub async fn start(
         &self,
-    ) -> Result<tokio::sync::watch::Sender<()>, Box<dyn std::error::Error + Send + Sync>> {
-        let (tx, rx) = watch::channel(());
+) -> Result<
+    (
+        oneshot::Receiver<()>,
+        oneshot::Receiver<()>,
+        watch::Sender<()>,
+    ),
+    Box<dyn Error + Send + Sync>,
+> {
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+    let (up_tx, up_rx) = oneshot::channel();
+    let (fin_tx, fin_rx) = oneshot::channel();
 
+ 
         {
             let addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), self.ssl_port);
             let tls_acceptor = tls_acceptor_from_base64(
@@ -77,7 +87,7 @@ impl HyperHls {
                 let m3u8_cache = Arc::clone(&self.m3u8_cache);
                 let fmp4_cache = Arc::clone(&self.fmp4_cache);
 
-                let mut shutdown_signal = rx.clone();
+                let mut shutdown_signal = shutdown_rx.clone();
                 async move {
                     let incoming = TcpListener::bind(&addr).await.unwrap();
                     let service = service_fn(move |req| {
@@ -151,7 +161,7 @@ impl HyperHls {
         let srv_h3 = {
             let m3u8_cache = Arc::clone(&self.m3u8_cache);
             let fmp4_cache = Arc::clone(&self.fmp4_cache);
-            let mut shutdown_signal = rx.clone();
+            let mut shutdown_signal = shutdown_rx.clone();
 
             async move {
                 loop {
@@ -195,12 +205,14 @@ impl HyperHls {
                         }
                     }
                 }
+
+                fin_tx.send(())
             }
         };
 
         tokio::spawn(srv_h3);
-
-        Ok(tx)
+        up_rx.send(());
+        Ok((up_tx, fin_tx, shutdown_rx))
     }
 }
 
