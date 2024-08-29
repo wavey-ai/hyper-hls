@@ -10,6 +10,7 @@ use h3_webtransport::{
     server::{self, WebTransportSession},
     stream,
 };
+use std::error::Error;
 use ts::playlist::{RingBuffer, Store};
 
 use http::{Method, Response, StatusCode};
@@ -27,7 +28,7 @@ use tls_helpers::{certs_from_base64, privkey_from_base64, tls_acceptor_from_base
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::pin;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::time::{sleep, Duration, Instant};
 use tracing::{error, info};
 use xxhash_rust::const_xxh3::xxh3_64 as const_xxh3;
@@ -59,19 +60,18 @@ impl HyperHls {
 
     pub async fn start(
         &self,
-) -> Result<
-    (
-        oneshot::Receiver<()>,
-        oneshot::Receiver<()>,
-        watch::Sender<()>,
-    ),
-    Box<dyn Error + Send + Sync>,
-> {
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
-    let (up_tx, up_rx) = oneshot::channel();
-    let (fin_tx, fin_rx) = oneshot::channel();
+    ) -> Result<
+        (
+            oneshot::Receiver<()>,
+            oneshot::Receiver<()>,
+            watch::Sender<()>,
+        ),
+        Box<dyn Error + Send + Sync>,
+    > {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(());
+        let (up_tx, up_rx) = oneshot::channel();
+        let (fin_tx, fin_rx) = oneshot::channel();
 
- 
         {
             let addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), self.ssl_port);
             let tls_acceptor = tls_acceptor_from_base64(
@@ -211,8 +211,8 @@ impl HyperHls {
         };
 
         tokio::spawn(srv_h3);
-        up_rx.send(());
-        Ok((up_tx, fin_tx, shutdown_rx))
+        let _ = up_tx.send(());
+        Ok((up_rx, fin_rx, shutdown_tx))
     }
 }
 
