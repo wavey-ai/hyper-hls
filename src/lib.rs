@@ -81,7 +81,7 @@ impl HyperHls {
                 true,
             )?;
 
-            println!("Starting to serve on https://{}", addr);
+            info!("listening at {}", addr);
             let ssl_port = self.ssl_port;
             let srv_h2 = {
                 let m3u8_cache = Arc::clone(&self.m3u8_cache);
@@ -113,7 +113,7 @@ impl HyperHls {
                                     let tls_stream = match tls_acceptor.accept(tcp_stream).await {
                                         Ok(tls_stream) => tls_stream,
                                         Err(err) => {
-                                            eprintln!("failed to perform tls handshake: {err:#}");
+                                            error!("failed to perform tls handshake: {err:#}");
                                             return;
                                         }
                                     };
@@ -121,7 +121,7 @@ impl HyperHls {
                                         .serve_connection(TokioIo::new(tls_stream), service)
                                         .await
                                     {
-                                        eprintln!("failed to serve connection: {err:#}");
+                                        error!("failed to serve connection: {err:#}");
                                     }
                                 });
                             }
@@ -227,10 +227,10 @@ async fn handle_connection(
                 let ext = req.extensions();
                 match req.method() {
                     &Method::CONNECT if ext.get::<Protocol>() == Some(&Protocol::WEB_TRANSPORT) => {
-                        tracing::info!("Peer wants to initiate a webtransport session");
-                        tracing::info!("Handing over connection to WebTransport");
+                        info!("Peer wants to initiate a webtransport session");
+                        info!("Handing over connection to WebTransport");
                         let session = WebTransportSession::accept(req, stream, conn).await?;
-                        tracing::info!("Established webtransport session");
+                        info!("Established webtransport session");
                         // 4. Get datagrams, bidirectional streams, and unidirectional streams and wait for client requests here.
                         // h3_conn needs to handover the datagrams, bidirectional streams, and unidirectional streams to the webtransport session.
                         handle_session_and_echo_all_inbound_messages(session).await?;
@@ -596,7 +596,7 @@ where
     pin!(send);
     pin!(recv);
 
-    tracing::info!("Got stream");
+    info!("Got stream");
     let mut buf = Vec::new();
     recv.read_to_end(&mut buf).await?;
 
@@ -612,7 +612,7 @@ where
 async fn send_chunked(mut send: impl AsyncWrite + Unpin, data: Bytes) -> anyhow::Result<()> {
     for chunk in data.chunks(4) {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        tracing::info!("Sending {chunk:?}");
+        info!("Sending {chunk:?}");
         send.write_all(chunk).await?;
     }
 
@@ -623,7 +623,7 @@ async fn open_bidi_test<S>(mut stream: S) -> anyhow::Result<()>
 where
     S: Unpin + AsyncRead + AsyncWrite,
 {
-    tracing::info!("Opening bidirectional stream");
+    info!("Opening bidirectional stream");
 
     stream
         .write_all(b"Hello from a server initiated bidi stream")
@@ -634,7 +634,7 @@ where
     stream.shutdown().await?;
     stream.read_to_end(&mut resp).await?;
 
-    tracing::info!("Got response from client: {resp:?}");
+    info!("Got response from client: {resp:?}");
 
     Ok(())
 }
@@ -681,14 +681,14 @@ where
             datagram = session.accept_datagram() => {
                 let datagram = datagram?;
                 if let Some((_, datagram)) = datagram {
-                    tracing::info!("Responding with {datagram:?}");
+                    info!("Responding with {datagram:?}");
                     // Put something before to make sure encoding and decoding works and don't just
                     // pass through
                     let mut resp = BytesMut::from(&b"Response: "[..]);
                     resp.put(datagram);
 
                     session.send_datagram(resp.freeze())?;
-                    tracing::info!("Finished sending datagram");
+                    info!("Finished sending datagram");
                 }
             }
             uni_stream = session.accept_uni() => {
@@ -709,7 +709,7 @@ where
         }
     }
 
-    tracing::info!("Finished handling session");
+    info!("Finished handling session");
 
     Ok(())
 }
