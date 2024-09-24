@@ -10,8 +10,8 @@ use h3_webtransport::{
     server::{self, WebTransportSession},
     stream,
 };
+use playlists::{RingBuffer, Store};
 use std::error::Error;
-use ts::playlist::{RingBuffer, Store};
 
 use http::{Method, Response, StatusCode};
 use http_body_util::Full;
@@ -81,7 +81,6 @@ impl HyperHls {
                 true,
             )?;
 
-            info!("listening at {}", addr);
             let ssl_port = self.ssl_port;
             let srv_h2 = {
                 let m3u8_cache = Arc::clone(&self.m3u8_cache);
@@ -98,6 +97,8 @@ impl HyperHls {
                             ssl_port,
                         )
                     });
+
+                    info!("listening at {}", addr);
 
                     loop {
                         tokio::select! {
