@@ -390,6 +390,7 @@ async fn handle_request_h2(
                 .headers_mut()
                 .insert("vary", "accept-encoding".parse().unwrap());
         }
+        add_cors_headers(&mut response);
         Ok(response)
     } else {
         let mut response = Response::new(Full::default());
@@ -398,9 +399,7 @@ async fn handle_request_h2(
             "alt-srv",
             format!("h3=\":{}\"; ma=2592000", ssl_port).parse().unwrap(),
         );
-        if req.method() == &Method::OPTIONS {
-            add_cors_headers(&mut response);
-        }
+        add_cors_headers(&mut response);
         Ok(response)
     }
 }
