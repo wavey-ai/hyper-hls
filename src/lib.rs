@@ -398,6 +398,9 @@ async fn handle_request_h2(
             "alt-srv",
             format!("h3=\":{}\"; ma=2592000", ssl_port).parse().unwrap(),
         );
+        if req.method() == &Method::OPTIONS {
+            add_cors_headers(&mut response);
+        }
         Ok(response)
     }
 }
@@ -573,12 +576,10 @@ fn add_cors_headers(res: &mut http::Response<http_body_util::Full<Bytes>>) {
         .insert("access-control-allow-origin", "*".parse().unwrap());
     res.headers_mut().insert(
         "access-control-allow-methods",
-        "GET, POST, PUT, DELETE, OPTIONS".parse().unwrap(),
+        "GET, OPTIONS".parse().unwrap(),
     );
-    res.headers_mut().insert(
-        "access-control-allow-headers",
-        "Content-Type".parse().unwrap(),
-    );
+    res.headers_mut()
+        .insert("access-control-allow-headers", "*".parse().unwrap());
 }
 
 macro_rules! log_result {
