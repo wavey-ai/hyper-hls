@@ -470,7 +470,21 @@ async fn request_handler(
 > {
     let res = match (method, path) {
         (&Method::OPTIONS, _) => (StatusCode::OK, None, None),
-
+        (&Method::HEAD, path) => {
+            let keys: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+            if keys.is_empty() {
+                (StatusCode::NOT_FOUND, None, None)
+            } else if keys[1] == "stream.m3u8" {
+                let stream_id = keys[0].parse::<u64>()?;
+                if let Some(res) = m3u8_cache.last(stream_id) {
+                    (StatusCode::OK, None, None)
+                } else {
+                    (StatusCode::NOT_FOUND, None, None)
+                }
+            } else {
+                (StatusCode::NOT_FOUND, None, None)
+            }
+        }
         (&Method::GET, path) => {
             let keys: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
