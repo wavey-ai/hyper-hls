@@ -10,7 +10,7 @@ use h3_webtransport::{
     server::{self, WebTransportSession},
     stream,
 };
-use playlists::{RingBuffer, Store};
+use playlists::{fmp4_cache::Fmp4Cache, m3u8_cache::M3u8Cache};
 use std::error::Error;
 
 use http::{Method, Response, StatusCode};
@@ -29,7 +29,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::pin;
 use tokio::sync::{oneshot, watch};
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tracing::{error, info};
 use xxhash_rust::const_xxh3::xxh3_64 as const_xxh3;
 
@@ -37,8 +37,8 @@ pub struct HyperHls {
     cert_pem_base64: String,
     privkey_pem_base64: String,
     ssl_port: u16,
-    fmp4_cache: Arc<RingBuffer>,
-    m3u8_cache: Arc<Store>,
+    fmp4_cache: Arc<Fmp4Cache>,
+    m3u8_cache: Arc<M3u8Cache>,
 }
 
 impl HyperHls {
@@ -46,8 +46,8 @@ impl HyperHls {
         cert_pem_base64: String,
         privkey_pem_base64: String,
         ssl_port: u16,
-        fmp4_cache: Arc<RingBuffer>,
-        m3u8_cache: Arc<Store>,
+        fmp4_cache: Arc<Fmp4Cache>,
+        m3u8_cache: Arc<M3u8Cache>,
     ) -> Self {
         Self {
             cert_pem_base64,
@@ -219,8 +219,8 @@ impl HyperHls {
 
 async fn handle_connection(
     mut conn: Connection<h3_quinn::Connection, Bytes>,
-    m3u8_cache: Arc<Store>,
-    fmp4_cache: Arc<RingBuffer>,
+    m3u8_cache: Arc<M3u8Cache>,
+    fmp4_cache: Arc<Fmp4Cache>,
 ) -> Result<()> {
     loop {
         match conn.accept().await {
@@ -265,38 +265,38 @@ async fn handle_connection(
 }
 
 async fn get_m3u8(
-    m3u8_cache: Arc<Store>,
+    m3u8_cache: Arc<M3u8Cache>,
     path: u64,
     msn: usize,
     idx: usize,
 ) -> Option<(Bytes, u64)> {
-    let timeout = Duration::from_secs(3);
-    let start_time = Instant::now();
-    let poll_interval = Duration::from_millis(5);
+    let timeout_duration = Duration::from_secs(3);
+    let poll_interval = Duration::from_millis(10);
 
-    while start_time.elapsed() < timeout {
-        {
-            if let Some(data) = m3u8_cache.get(path, msn, idx) {
+    timeout(timeout_duration, async {
+        loop {
+            if let Some(data) = m3u8_cache.get(path, msn, idx).unwrap() {
                 return Some(data.clone());
             }
-            if let Some(data) = m3u8_cache.get(path, msn + 1, 0) {
+
+            if let Some(data) = m3u8_cache.get(path, msn + 1, 0).unwrap() {
                 return Some(data.clone());
             }
+
+            sleep(poll_interval).await;
         }
-
-        sleep(poll_interval).await;
-    }
-
-    None
+    })
+    .await
+    .ok()?
 }
 
 async fn get_seg(
-    fmp4_cache: Arc<RingBuffer>,
-    m3u8_cache: Arc<Store>,
+    fmp4_cache: Arc<Fmp4Cache>,
+    m3u8_cache: Arc<M3u8Cache>,
     path: u64,
     id: usize,
 ) -> Option<(Bytes, u64)> {
-    if let Some(idxs) = m3u8_cache.get_idxs(path, id) {
+    if let Some(idxs) = m3u8_cache.get_idxs(path, id).unwrap() {
         let mut buf = Vec::new();
         for n in idxs.0..idxs.1 {
             if let Some(data) = fmp4_cache.get(path, n) {
@@ -314,7 +314,7 @@ async fn get_seg(
     }
 }
 
-async fn get_part(fmp4_cache: Arc<RingBuffer>, path: u64, id: usize) -> Option<(Bytes, u64)> {
+async fn get_part(fmp4_cache: Arc<Fmp4Cache>, path: u64, id: usize) -> Option<(Bytes, u64)> {
     let timeout = Duration::from_secs(3);
     let start_time = Instant::now();
     let poll_interval = Duration::from_millis(1);
@@ -356,8 +356,8 @@ fn extract_id(s: &str) -> Option<usize> {
 
 async fn handle_request_h2(
     req: http::Request<Incoming>,
-    fmp4_cache: Arc<RingBuffer>,
-    m3u8_cache: Arc<Store>,
+    fmp4_cache: Arc<Fmp4Cache>,
+    m3u8_cache: Arc<M3u8Cache>,
     ssl_port: u16,
 ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
     let (status, data, content_type) = request_handler(
@@ -407,8 +407,8 @@ async fn handle_request_h2(
 async fn handle_request_h3(
     req: http::Request<()>,
     mut stream: RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-    fmp4_cache: Arc<RingBuffer>,
-    m3u8_cache: Arc<Store>,
+    fmp4_cache: Arc<Fmp4Cache>,
+    m3u8_cache: Arc<M3u8Cache>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (status, data, content_type) = request_handler(
         req.method(),
@@ -461,8 +461,8 @@ async fn request_handler(
     method: &Method,
     path: &str,
     query: Option<&str>,
-    fmp4_cache: Arc<RingBuffer>,
-    m3u8_cache: Arc<Store>,
+    fmp4_cache: Arc<Fmp4Cache>,
+    m3u8_cache: Arc<M3u8Cache>,
 ) -> Result<
     (StatusCode, Option<(Bytes, u64)>, Option<String>),
     Box<dyn std::error::Error + Send + Sync>,
@@ -475,7 +475,7 @@ async fn request_handler(
                 (StatusCode::NOT_FOUND, None, None)
             } else if keys[1] == "stream.m3u8" {
                 let stream_id = keys[0].parse::<u64>()?;
-                if let Some(res) = m3u8_cache.last(stream_id) {
+                if let Some(res) = m3u8_cache.last(stream_id).unwrap() {
                     (StatusCode::OK, None, None)
                 } else {
                     (StatusCode::NOT_FOUND, None, None)
@@ -540,12 +540,12 @@ async fn request_handler(
                                 }
                             }
                         } else if params.get("_HLS_skip").is_some() {
-                            if let Some(res) = m3u8_cache.last(stream_id) {
+                            if let Some(res) = m3u8_cache.last(stream_id).unwrap() {
                                 data = Some(res)
                             }
                         }
                     } else if keys[1] == "stream.m3u8" {
-                        if let Some(res) = m3u8_cache.last(stream_id) {
+                        if let Some(res) = m3u8_cache.last(stream_id).unwrap() {
                             data = Some(res)
                         }
                     } else if keys[1].starts_with("s") {
@@ -563,7 +563,7 @@ async fn request_handler(
                             }
                         }
                     } else if keys[1].starts_with("init.mp4") {
-                        if let Some(d) = m3u8_cache.get_init(stream_id) {
+                        if let Ok(d) = m3u8_cache.get_init(stream_id) {
                             data = Some((d, 0));
                         }
                     }
