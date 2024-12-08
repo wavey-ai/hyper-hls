@@ -234,7 +234,7 @@ async fn handle_connection(
                         info!("Established webtransport session");
                         // 4. Get datagrams, bidirectional streams, and unidirectional streams and wait for client requests here.
                         // h3_conn needs to handover the datagrams, bidirectional streams, and unidirectional streams to the webtransport session.
-                        handle_session_and_echo_all_inbound_messages(session).await?;
+                        handle_transport_session(session, fmp4_cache.clone()).await?;
                         return Ok(());
                     }
                     _ => {
@@ -247,7 +247,6 @@ async fn handle_connection(
                                 error!("handling request failed: {}", e);
                             }
                         });
-                        return Ok(());
                     }
                 }
             }
@@ -271,7 +270,7 @@ async fn get_m3u8(
     idx: usize,
 ) -> Option<(Bytes, u64)> {
     let timeout_duration = Duration::from_secs(3);
-    let poll_interval = Duration::from_millis(10);
+    let poll_interval = Duration::from_millis(3);
 
     timeout(timeout_duration, async {
         loop {
@@ -338,12 +337,12 @@ fn detect_content_type(file_name: &str) -> &'static str {
     } else if file_name.ends_with(".jpeg") {
         "image/jpeg"
     } else {
-        ""
+        "text/plain"
     }
 }
 
 fn extract_id(s: &str) -> Option<usize> {
-    let re = Regex::new(r"(s|p)(\d+)(\.mp4)$").unwrap();
+    let re = Regex::new(r"(s|p)(\d+)(\.mp4|\.ts)$").unwrap();
     re.captures(s).and_then(|caps| {
         if let Some(id_match) = caps.get(2) {
             let id = usize::from_str(id_match.as_str()).ok()?;
@@ -548,6 +547,11 @@ async fn request_handler(
                         if let Some(res) = m3u8_cache.last(stream_id).unwrap() {
                             data = Some(res)
                         }
+                    } else if keys[1] == "last" {
+                        if let Some(seq) = fmp4_cache.last(stream_id) {
+                            let b = Bytes::from(seq.to_string().into_bytes());
+                            data = Some((b, 0))
+                        }
                     } else if keys[1].starts_with("s") {
                         if let Some(id) = extract_id(&keys[1]) {
                             if let Some(res) =
@@ -655,9 +659,10 @@ where
 }
 
 /// This method will echo all inbound datagrams, unidirectional and bidirectional streams.
-#[tracing::instrument(level = "info", skip(session))]
-async fn handle_session_and_echo_all_inbound_messages<C>(
+#[tracing::instrument(level = "info", skip(session, fmp4_cache))]
+async fn handle_transport_session<C>(
     session: WebTransportSession<C, Bytes>,
+    fmp4_cache: Arc<Fmp4Cache>,
 ) -> anyhow::Result<()>
 where
     // Use trait bounds to ensure we only happen to use implementation that are only for the quinn
@@ -696,14 +701,20 @@ where
             datagram = session.accept_datagram() => {
                 let datagram = datagram?;
                 if let Some((_, datagram)) = datagram {
-                    info!("Responding with {datagram:?}");
-                    // Put something before to make sure encoding and decoding works and don't just
-                    // pass through
-                    let mut resp = BytesMut::from(&b"Response: "[..]);
-                    resp.put(datagram);
-
-                    session.send_datagram(resp.freeze())?;
-                    info!("Finished sending datagram");
+                    if let Some(mut last) = fmp4_cache.last(15) {
+                        loop {
+                            if let Some((b,_)) = get_part(fmp4_cache.clone(), 15, last).await {
+                                for chunk in b.chunks(188) {
+                                    let mut resp = BytesMut::from(chunk);
+                                    resp.put(datagram.clone());
+                                    session.send_datagram(resp.freeze())?;
+                                }
+                                last += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             uni_stream = session.accept_uni() => {
