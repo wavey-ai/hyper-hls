@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use bytes::{BufMut, Bytes, BytesMut};
+use h3::ext;
 use h3::server::RequestStream;
 use h3::{
     ext::Protocol,
@@ -10,20 +11,20 @@ use h3_webtransport::{
     server::{self, WebTransportSession},
     stream,
 };
-use playlists::{fmp4_cache::Fmp4Cache, m3u8_cache::M3u8Cache};
-use std::error::Error;
-
 use http::{Method, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+use playlists::{fmp4_cache::Fmp4Cache, m3u8_cache::M3u8Cache};
 use regex::Regex;
 use std::collections::HashMap;
+use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use storage::Storage;
 use tls_helpers::{certs_from_base64, privkey_from_base64, tls_acceptor_from_base64};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -39,6 +40,7 @@ pub struct HyperHls {
     ssl_port: u16,
     fmp4_cache: Arc<Fmp4Cache>,
     m3u8_cache: Arc<M3u8Cache>,
+    storage: Arc<Storage>,
 }
 
 impl HyperHls {
@@ -48,6 +50,7 @@ impl HyperHls {
         ssl_port: u16,
         fmp4_cache: Arc<Fmp4Cache>,
         m3u8_cache: Arc<M3u8Cache>,
+        storage: Arc<Storage>,
     ) -> Self {
         Self {
             cert_pem_base64,
@@ -55,6 +58,7 @@ impl HyperHls {
             ssl_port,
             fmp4_cache,
             m3u8_cache,
+            storage,
         }
     }
 
@@ -85,6 +89,7 @@ impl HyperHls {
             let srv_h2 = {
                 let m3u8_cache = Arc::clone(&self.m3u8_cache);
                 let fmp4_cache = Arc::clone(&self.fmp4_cache);
+                let storage = Arc::clone(&self.storage);
 
                 let mut shutdown_signal = shutdown_rx.clone();
                 async move {
@@ -94,6 +99,7 @@ impl HyperHls {
                             req,
                             Arc::clone(&fmp4_cache),
                             Arc::clone(&m3u8_cache),
+                            Arc::clone(&storage),
                             ssl_port,
                         )
                     });
@@ -162,6 +168,8 @@ impl HyperHls {
         let srv_h3 = {
             let m3u8_cache = Arc::clone(&self.m3u8_cache);
             let fmp4_cache = Arc::clone(&self.fmp4_cache);
+            let storage = Arc::clone(&self.storage);
+
             let mut shutdown_signal = shutdown_rx.clone();
 
             async move {
@@ -176,6 +184,8 @@ impl HyperHls {
 
                                 let m3u8_cache = Arc::clone(&m3u8_cache);
                                 let fmp4_cache = Arc::clone(&fmp4_cache);
+                                let storage = Arc::clone(&storage);
+
                                 tokio::spawn(async move {
                                     match new_conn.await {
                                         Ok(conn) => {
@@ -190,7 +200,7 @@ impl HyperHls {
                                                 .unwrap();
 
                                                 tokio::spawn(async move {
-                                                    if let Err(err) = handle_connection(h3_conn, m3u8_cache, fmp4_cache).await {
+                                                    if let Err(err) = handle_connection(h3_conn, m3u8_cache, fmp4_cache, storage).await {
                                                         tracing::error!("Failed to handle connection: {err:?}");
                                                     }
                                                 });
@@ -221,6 +231,7 @@ async fn handle_connection(
     mut conn: Connection<h3_quinn::Connection, Bytes>,
     m3u8_cache: Arc<M3u8Cache>,
     fmp4_cache: Arc<Fmp4Cache>,
+    storage: Arc<Storage>,
 ) -> Result<()> {
     loop {
         match conn.accept().await {
@@ -232,17 +243,17 @@ async fn handle_connection(
                         info!("Handing over connection to WebTransport");
                         let session = WebTransportSession::accept(req, stream, conn).await?;
                         info!("Established webtransport session");
-                        // 4. Get datagrams, bidirectional streams, and unidirectional streams and wait for client requests here.
-                        // h3_conn needs to handover the datagrams, bidirectional streams, and unidirectional streams to the webtransport session.
                         handle_transport_session(session, fmp4_cache.clone()).await?;
                         return Ok(());
                     }
                     _ => {
                         let m3u8_cache = Arc::clone(&m3u8_cache);
                         let fmp4_cache = Arc::clone(&fmp4_cache);
+                        let storage = Arc::clone(&storage);
                         tokio::spawn(async move {
                             if let Err(e) =
-                                handle_request_h3(req, stream, fmp4_cache, m3u8_cache).await
+                                handle_request_h3(req, stream, fmp4_cache, m3u8_cache, storage)
+                                    .await
                             {
                                 error!("handling request failed: {}", e);
                             }
@@ -329,6 +340,28 @@ async fn get_part(fmp4_cache: Arc<Fmp4Cache>, path: u64, id: usize) -> Option<(B
     None
 }
 
+async fn get_object(
+    storage: Arc<Storage>,
+    bucket_name: &str,
+    path: u64,
+    range_start: usize,
+    range_end: Option<usize>,
+) -> Option<(Bytes, u64)> {
+    match storage
+        .get_byte_range(bucket_name, &path.to_string(), range_start, range_end)
+        .await
+    {
+        Ok(b) => {
+            let h = const_xxh3(&b);
+            Some((b, h))
+        }
+        Err(e) => {
+            error!("error getting object: {:?}", e);
+            None
+        }
+    }
+}
+
 fn detect_content_type(file_name: &str) -> &'static str {
     if file_name.ends_with(".m3u8") {
         "application/vnd.apple.mpegurl"
@@ -336,6 +369,8 @@ fn detect_content_type(file_name: &str) -> &'static str {
         "video/mp4"
     } else if file_name.ends_with(".jpeg") {
         "image/jpeg"
+    } else if file_name.ends_with(".part") {
+        "application/octet-stream"
     } else {
         "text/plain"
     }
@@ -357,14 +392,16 @@ async fn handle_request_h2(
     req: http::Request<Incoming>,
     fmp4_cache: Arc<Fmp4Cache>,
     m3u8_cache: Arc<M3u8Cache>,
+    storage: Arc<Storage>,
     ssl_port: u16,
 ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
     let (status, data, content_type) = request_handler(
         req.method(),
         req.uri().path(),
         req.uri().query(),
-        fmp4_cache.clone(),
-        m3u8_cache.clone(),
+        fmp4_cache,
+        m3u8_cache,
+        storage,
     )
     .await?;
     if let (Some(data), Some(content_type)) = (data, content_type) {
@@ -408,6 +445,7 @@ async fn handle_request_h3(
     mut stream: RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     fmp4_cache: Arc<Fmp4Cache>,
     m3u8_cache: Arc<M3u8Cache>,
+    storage: Arc<Storage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (status, data, content_type) = request_handler(
         req.method(),
@@ -415,6 +453,7 @@ async fn handle_request_h3(
         req.uri().query(),
         fmp4_cache,
         m3u8_cache,
+        storage,
     )
     .await?;
 
@@ -462,6 +501,7 @@ async fn request_handler(
     query: Option<&str>,
     fmp4_cache: Arc<Fmp4Cache>,
     m3u8_cache: Arc<M3u8Cache>,
+    storage: Arc<Storage>,
 ) -> Result<
     (StatusCode, Option<(Bytes, u64)>, Option<String>),
     Box<dyn std::error::Error + Send + Sync>,
@@ -518,7 +558,14 @@ async fn request_handler(
                     let mut data: Option<(Bytes, u64)> = None;
                     let content_type = Some(ct.to_string());
 
-                    if let Some(query) = query {
+                    if keys[1] == "bkt" && keys.len() == 4 {
+                        // prefer range query in the url rather than the header
+                        if let Ok((a, b)) = parse_range(keys[3]) {
+                            if let Some(res) = get_object(storage, keys[2], stream_id, a, b).await {
+                                data = Some(res)
+                            }
+                        }
+                    } else if let Some(query) = query {
                         query.split('&').for_each(|part| {
                             let mut split = part.splitn(2, '=');
                             if let (Some(key), Some(value)) = (split.next(), split.next()) {
@@ -658,8 +705,6 @@ where
     Ok(())
 }
 
-/// This method will echo all inbound datagrams, unidirectional and bidirectional streams.
-#[tracing::instrument(level = "info", skip(session, fmp4_cache))]
 async fn handle_transport_session<C>(
     session: WebTransportSession<C, Bytes>,
     fmp4_cache: Arc<Fmp4Cache>,
@@ -704,9 +749,8 @@ where
                     if let Some(mut last) = fmp4_cache.last(15) {
                         loop {
                             if let Some((b,_)) = get_part(fmp4_cache.clone(), 15, last).await {
-                                for chunk in b.chunks(188) {
-                                    let mut resp = BytesMut::from(chunk);
-                                    resp.put(datagram.clone());
+                                for chunk in b.chunks(188 * 6) {
+                                    let resp = BytesMut::from(chunk);
                                     session.send_datagram(resp.freeze())?;
                                 }
                                 last += 1;
@@ -738,4 +782,27 @@ where
     info!("Finished handling session");
 
     Ok(())
+}
+
+fn parse_range(s: &str) -> Result<(usize, Option<usize>), &'static str> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.is_empty() {
+        return Err("Empty string");
+    }
+    let first = parts[0]
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "Invalid first number")?;
+    let second = if parts.len() > 1 && !parts[1].trim().is_empty() {
+        Some(
+            parts[1]
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "Invalid second number")?,
+        )
+    } else {
+        None
+    };
+
+    Ok((first, second))
 }
