@@ -31,6 +31,7 @@ h3-quinn = { git = "https://github.com/hyperium/h3.git", rev = "eb79204" }
 h3-webtransport = { git = "https://github.com/hyperium/h3.git", rev = "eb79204" }
 playlists = { git = "ssh://git@github.com/wavey-ai/playlists.git" }
 tls-helpers = "0.1.3"
+xmpegts = { git = "ssh://git@github.com/wavey-ai/xiu" }
 
 [profile.release]
 opt-level = 3

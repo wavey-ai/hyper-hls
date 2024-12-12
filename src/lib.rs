@@ -11,6 +11,7 @@ use h3_webtransport::{
     server::{self, WebTransportSession},
     stream,
 };
+use http::header::RANGE;
 use http::{Method, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -32,6 +33,7 @@ use tokio::pin;
 use tokio::sync::{oneshot, watch};
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tracing::{error, info};
+use xmpegts::{define::epsi_stream_type, ts::TsMuxer};
 use xxhash_rust::const_xxh3::xxh3_64 as const_xxh3;
 
 pub struct HyperHls {
@@ -395,10 +397,16 @@ async fn handle_request_h2(
     storage: Arc<Storage>,
     ssl_port: u16,
 ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
+    let range_header = req
+        .headers()
+        .get(RANGE)
+        .and_then(|value| value.to_str().ok());
+
     let (status, data, content_type) = request_handler(
         req.method(),
         req.uri().path(),
         req.uri().query(),
+        range_header,
         fmp4_cache,
         m3u8_cache,
         storage,
@@ -447,10 +455,16 @@ async fn handle_request_h3(
     m3u8_cache: Arc<M3u8Cache>,
     storage: Arc<Storage>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let range_header = req
+        .headers()
+        .get(RANGE)
+        .and_then(|value| value.to_str().ok());
+
     let (status, data, content_type) = request_handler(
         req.method(),
         req.uri().path(),
         req.uri().query(),
+        range_header,
         fmp4_cache,
         m3u8_cache,
         storage,
@@ -499,6 +513,7 @@ async fn request_handler(
     method: &Method,
     path: &str,
     query: Option<&str>,
+    range_header: Option<&str>,
     fmp4_cache: Arc<Fmp4Cache>,
     m3u8_cache: Arc<M3u8Cache>,
     storage: Arc<Storage>,
@@ -558,11 +573,18 @@ async fn request_handler(
                     let mut data: Option<(Bytes, u64)> = None;
                     let content_type = Some(ct.to_string());
 
-                    if keys[1] == "bkt" && keys.len() == 4 {
-                        // prefer range query in the url rather than the header
-                        if let Ok((a, b)) = parse_range(keys[3]) {
-                            if let Some(res) = get_object(storage, keys[2], stream_id, a, b).await {
-                                data = Some(res)
+                    if keys[1] == "bkt" && keys.len() == 3 {
+                        if let Some(range_header) = range_header {
+                            if let Ok((a, b)) = parse_range(range_header) {
+                                let range_start = a.unwrap_or(0); // Default to 0 if a is None
+                                let range_end = b; // b is already an Option<usize>
+
+                                if let Some(res) =
+                                    get_object(storage, keys[2], stream_id, range_start, range_end)
+                                        .await
+                                {
+                                    data = Some(res);
+                                }
                             }
                         }
                     } else if let Some(query) = query {
@@ -740,7 +762,10 @@ where
     let stream = session.open_bi(session_id).await?;
 
     tokio::spawn(async move { log_result!(open_bidi_test(stream).await) });
-
+    let mut muxer = TsMuxer::new();
+    let pid = muxer
+        .add_stream(epsi_stream_type::PSI_STREAM_AAC, BytesMut::new())
+        .unwrap();
     loop {
         tokio::select! {
             datagram = session.accept_datagram() => {
@@ -748,12 +773,23 @@ where
                 if let Some((_, datagram)) = datagram {
                     if let Some(mut last) = fmp4_cache.last(15) {
                         loop {
-                            if let Some((b,_)) = get_part(fmp4_cache.clone(), 15, last).await {
+                            if let Some((data,_)) = get_part(fmp4_cache.clone(), 15, last).await {
+                                muxer
+                                    .write(
+                                        pid,
+                                        0,
+                                        0,
+                                        0,
+                                        data.try_into().unwrap(),
+                                    )
+                                    .unwrap();
+
+                                let b = muxer.get_data();
                                 for chunk in b.chunks(188 * 6) {
-                                    let resp = BytesMut::from(chunk);
-                                    session.send_datagram(resp.freeze())?;
+                                    if let Err(e) = session.send_datagram(Bytes::from(chunk.to_vec())) {
+                                        error!("error sending datagram: {}", e);
+                                    }
                                 }
-                                last += 1;
                             } else {
                                 break;
                             }
@@ -784,25 +820,39 @@ where
     Ok(())
 }
 
-fn parse_range(s: &str) -> Result<(usize, Option<usize>), &'static str> {
-    let parts: Vec<&str> = s.split(',').collect();
-    if parts.is_empty() {
-        return Err("Empty string");
+fn parse_range(s: &str) -> Result<(Option<usize>, Option<usize>), &'static str> {
+    // Check if the range starts with "bytes=" and strip it
+    let s = s.strip_prefix("bytes=").ok_or("Invalid range prefix")?;
+
+    // Split the range into two parts using the '-' character
+    let parts: Vec<&str> = s.split('-').collect();
+
+    if parts.len() != 2 {
+        return Err("Invalid range format");
     }
-    let first = parts[0]
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| "Invalid first number")?;
-    let second = if parts.len() > 1 && !parts[1].trim().is_empty() {
+
+    let start = if !parts[0].is_empty() {
         Some(
-            parts[1]
+            parts[0]
                 .trim()
                 .parse::<usize>()
-                .map_err(|_| "Invalid second number")?,
+                .map_err(|_| "Invalid start number")?,
         )
     } else {
         None
     };
 
-    Ok((first, second))
+    let end = if !parts[1].is_empty() {
+        Some(
+            parts[1]
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| "Invalid end number")?,
+        )
+    } else {
+        None
+    };
+
+    // Return the parsed start and end
+    Ok((start, end))
 }
