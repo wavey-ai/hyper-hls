@@ -1,16 +1,12 @@
 use anyhow::{Context, Result};
-use bytes::{BufMut, Bytes, BytesMut};
-use h3::ext;
+use bytes::{Bytes, BytesMut};
 use h3::server::RequestStream;
 use h3::{
     ext::Protocol,
     quic::{self, RecvDatagramExt, SendDatagramExt, SendStreamUnframed},
     server::Connection,
 };
-use h3_webtransport::{
-    server::{self, WebTransportSession},
-    stream,
-};
+use h3_webtransport::{server::WebTransportSession, stream};
 use http::header::RANGE;
 use http::{Method, Response, StatusCode};
 use http_body_util::Full;
@@ -33,7 +29,8 @@ use tokio::pin;
 use tokio::sync::{oneshot, watch};
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tracing::{error, info};
-use xmpegts::{define::epsi_stream_type, ts::TsMuxer};
+use xmpegts::define::epsi_stream_type;
+use xmpegts::ts::TsMuxer;
 use xxhash_rust::const_xxh3::xxh3_64 as const_xxh3;
 
 pub struct HyperHls {
@@ -397,6 +394,7 @@ async fn handle_request_h2(
     storage: Arc<Storage>,
     ssl_port: u16,
 ) -> Result<Response<Full<Bytes>>, Box<dyn std::error::Error + Send + Sync>> {
+    // Handle other requests (existing code)
     let range_header = req
         .headers()
         .get(RANGE)
@@ -412,6 +410,7 @@ async fn handle_request_h2(
         storage,
     )
     .await?;
+
     if let (Some(data), Some(content_type)) = (data, content_type) {
         let mut response = Response::new(Full::from(data.0));
         *response.status_mut() = status;
@@ -756,63 +755,71 @@ where
     C::BidiStream: SendStreamUnframed<Bytes>,
     C::SendStream: SendStreamUnframed<Bytes>,
 {
-    let session_id = session.session_id();
+    // let session_id = session.session_id();
 
     // This will open a bidirectional stream and send a message to the client right after connecting!
-    let stream = session.open_bi(session_id).await?;
+    //let stream = session.open_bi(session_id).await?;
 
-    tokio::spawn(async move { log_result!(open_bidi_test(stream).await) });
+    //    tokio::spawn(async move { log_result!(open_bidi_test(stream).await) });
     let mut muxer = TsMuxer::new();
     let pid = muxer
         .add_stream(epsi_stream_type::PSI_STREAM_AAC, BytesMut::new())
         .unwrap();
     loop {
         tokio::select! {
-            datagram = session.accept_datagram() => {
-                let datagram = datagram?;
-                if let Some((_, datagram)) = datagram {
-                    if let Some(mut last) = fmp4_cache.last(15) {
-                        loop {
-                            if let Some((data,_)) = get_part(fmp4_cache.clone(), 15, last).await {
-                                muxer
-                                    .write(
-                                        pid,
-                                        0,
-                                        0,
-                                        0,
-                                        data.try_into().unwrap(),
-                                    )
-                                    .unwrap();
+                    datagram = session.accept_datagram() => {
+                        let datagram = datagram?;
+                        if let Some((_, datagram)) = datagram {
+                            if datagram.len() == 8 {
+                                let id = u64::from_le_bytes(datagram[..].try_into().unwrap());
+                                if let Some(mut last) = fmp4_cache.last(id) {
+                                    loop {
+                                        last += 1;
+                                        if let Some((data,_)) = get_part(fmp4_cache.clone(), id, last).await {
+                                            muxer
+                                                .write(
+                                                    pid,
+                                                    0,
+                                                    0,
+                                                    0,
+                                                    data.try_into().unwrap(),
+                                                )
+                                                .unwrap();
 
-                                let b = muxer.get_data();
-                                for chunk in b.chunks(188 * 6) {
-                                    if let Err(e) = session.send_datagram(Bytes::from(chunk.to_vec())) {
-                                        error!("error sending datagram: {}", e);
+                                            let b = muxer.get_data();
+                                            for chunk in b.chunks(188 * 6) {
+                                                if let Err(e) = session.send_datagram(Bytes::from(chunk.to_vec())) {
+                                                    error!("error sending datagram: {}", e);
+
+                                                    return Ok(());
+                                                }
+                                            }
+                                        } else {
+                                            break;
+                                        }
                                     }
                                 }
-                            } else {
-                                break;
                             }
                         }
                     }
-                }
-            }
-            uni_stream = session.accept_uni() => {
-                let (id, stream) = uni_stream?.unwrap();
+              /*
+                    uni_stream = session.accept_uni() => {
+                        let (id, stream) = uni_stream?.unwrap();
 
-                let send = session.open_uni(id).await?;
-                tokio::spawn( async move { log_result!(echo_stream(send, stream).await); });
-            }
-            stream = session.accept_bi() => {
-                if let Some(server::AcceptedBi::BidiStream(_, stream)) = stream? {
-                    let (send, recv) = quic::BidiStream::split(stream);
-                    tokio::spawn( async move { log_result!(echo_stream(send, recv).await); });
+                        let send = session.open_uni(id).await?;
+                        tokio::spawn( async move { log_result!(echo_stream(send, stream).await); });
+                    }
+                    stream = session.accept_bi() => {
+                        if let Some(server::AcceptedBi::BidiStream(_, stream)) = stream? {
+                            let (send, recv) = quic::BidiStream::split(stream);
+                            tokio::spawn( async move { log_result!(echo_stream(send, recv).await); });
+                        }
+                    }
+        */
+                    else => {
+                        break
+                    }
                 }
-            }
-            else => {
-                break
-            }
-        }
     }
 
     info!("Finished handling session");
