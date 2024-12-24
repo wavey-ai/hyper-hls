@@ -429,7 +429,7 @@ async fn handle_request_h3(
             Err(err) => {
                 error!("unable to send response to connection peer: {:?}", err);
             }
-        }         t
+        }
 
         stream.send_data(data.0).await?;
     } else {
