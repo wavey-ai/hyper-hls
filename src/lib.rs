@@ -3,10 +3,15 @@ use bytes::{Bytes, BytesMut};
 use h3::server::RequestStream;
 use h3::{
     ext::Protocol,
-    quic::{self, RecvDatagramExt, SendDatagramExt, SendStreamUnframed},
+    quic::{self, SendStreamUnframed},
     server::Connection,
 };
-use h3_webtransport::{server::WebTransportSession, stream};
+use h3_datagram::quic_traits::{RecvDatagramExt, SendDatagramExt};
+use h3_quinn::quinn::{self, crypto::rustls::QuicServerConfig};
+use h3_webtransport::{
+    server::{self, WebTransportSession},
+    stream,
+};
 use http::{Method, Response, StatusCode};
 use http_body_util::Full;
 use hyper::body::Incoming;
@@ -20,7 +25,7 @@ use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
-use tls_helpers::{certs_from_base64, privkey_from_base64, tls_acceptor_from_base64};
+use tls_helpers::{load_certs_from_base64, load_keys_from_base64, tls_acceptor_from_base64};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::pin;
@@ -132,13 +137,9 @@ impl HyperHls {
             tokio::spawn(srv_h2);
         }
 
-        let certs = certs_from_base64(&self.cert_pem_base64)?;
-        let key = privkey_from_base64(&self.privkey_pem_base64)?;
+        let certs = load_certs_from_base64(&self.cert_pem_base64)?;
+        let key = load_keys_from_base64(&self.privkey_pem_base64)?;
         let mut tls_config = rustls::ServerConfig::builder()
-            .with_safe_default_cipher_suites()
-            .with_safe_default_kx_groups()
-            .with_protocol_versions(&[&rustls::version::TLS13])
-            .unwrap()
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .unwrap();
@@ -147,7 +148,8 @@ impl HyperHls {
         let alpn: Vec<Vec<u8>> = vec![b"h3".to_vec()];
         tls_config.alpn_protocols = alpn;
 
-        let server_config = quinn::ServerConfig::with_crypto(Arc::new(tls_config));
+        let server_config =
+            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls_config)?));
         let addr = SocketAddr::new(Ipv4Addr::new(0, 0, 0, 0).into(), self.ssl_port);
         let endpoint = quinn::Endpoint::server(server_config, addr).unwrap();
 
@@ -290,7 +292,7 @@ async fn get_seg(
     if let Some(idxs) = m3u8_cache.get_idxs(path, id).unwrap() {
         let mut buf = Vec::new();
         for n in idxs.0..idxs.1 {
-            if let Some(data) = fmp4_cache.get(path, n) {
+            if let Some(data) = fmp4_cache.get(path as usize, n).await {
                 buf.extend_from_slice(&data.0);
             } else {
                 return None; // Part missing, return None
@@ -308,10 +310,10 @@ async fn get_seg(
 async fn get_part(fmp4_cache: Arc<Fmp4Cache>, path: u64, id: usize) -> Option<(Bytes, u64)> {
     let timeout = Duration::from_secs(3);
     let start_time = Instant::now();
-    let poll_interval = Duration::from_millis(1);
+    let poll_interval = Duration::from_millis(5);
 
     while start_time.elapsed() < timeout {
-        if let Some(data) = fmp4_cache.get(path, id) {
+        if let Some(data) = fmp4_cache.get(path as usize, id).await {
             return Some(data.clone());
         }
 
@@ -541,7 +543,7 @@ async fn request_handler(
                             data = Some(res)
                         }
                     } else if keys[1] == "last" {
-                        if let Some(seq) = fmp4_cache.last(stream_id) {
+                        if let Some(seq) = fmp4_cache.last(stream_id as usize) {
                             let b = Bytes::from(seq.to_string().into_bytes());
                             data = Some((b, 0))
                         }
@@ -679,6 +681,8 @@ where
     stream::SendStream<C::SendStream, Bytes>: AsyncWrite,
     C::BidiStream: SendStreamUnframed<Bytes>,
     C::SendStream: SendStreamUnframed<Bytes>,
+    <C as RecvDatagramExt>::Error: h3::quic::Error,
+    <C as SendDatagramExt<Bytes>>::Error: h3::quic::Error,
 {
     // let session_id = session.session_id();
 
@@ -697,9 +701,10 @@ where
                         if let Some((_, datagram)) = datagram {
                             if datagram.len() == 8 {
                                 let id = u64::from_le_bytes(datagram[..].try_into().unwrap());
-                                if let Some(mut last) = fmp4_cache.last(id) {
+                                info!("WebTransportSession requested id {}", id);
+                                if let Some(mut last) = fmp4_cache.last(id as usize) {
+                                    info!("{} last sequence is {}", id, last);
                                     loop {
-                                        last += 1;
                                         if let Some((data,_)) = get_part(fmp4_cache.clone(), id, last).await {
                                             muxer
                                                 .write(
@@ -710,7 +715,6 @@ where
                                                     BytesMut::from(data),
                                                 )
                                                 .unwrap();
-
                                             let b = muxer.get_data();
                                             for chunk in b.chunks(188 * 6) {
                                                 if let Err(e) = session.send_datagram(Bytes::from(chunk.to_vec())) {
@@ -719,10 +723,13 @@ where
                                                     return Ok(());
                                                 }
                                             }
+                                            last += 1;
                                         } else {
-                                            break;
+                                            sleep(Duration::from_millis(10)).await;
                                         }
                                     }
+                                } else {
+                                    info!("{} is empty", id);
                                 }
                             }
                         }
