@@ -186,7 +186,7 @@ impl HyperHls {
                                                 .unwrap();
 
                                                 tokio::spawn(async move {
-                                                    if let Err(err) = handle_connection(h3_conn, m3u8_cache, fmp4_cache).await {
+                                                    if let Err(err) = handle_h3_connection(h3_conn, m3u8_cache, fmp4_cache).await {
                                                         tracing::error!("Failed to handle connection: {err:?}");
                                                     }
                                                 });
@@ -213,7 +213,7 @@ impl HyperHls {
     }
 }
 
-async fn handle_connection(
+async fn handle_h3_connection(
     mut conn: Connection<h3_quinn::Connection, Bytes>,
     m3u8_cache: Arc<M3u8Cache>,
     fmp4_cache: Arc<Fmp4Cache>,
@@ -307,13 +307,13 @@ async fn get_seg(
     }
 }
 
-async fn get_part(fmp4_cache: Arc<Fmp4Cache>, path: u64, id: usize) -> Option<(Bytes, u64)> {
+async fn get_part(fmp4_cache: Arc<Fmp4Cache>, idx: usize, id: usize) -> Option<(Bytes, u64)> {
     let timeout = Duration::from_secs(3);
     let start_time = Instant::now();
-    let poll_interval = Duration::from_millis(5);
+    let poll_interval = Duration::from_millis(1);
 
     while start_time.elapsed() < timeout {
-        if let Some(data) = fmp4_cache.get(path as usize, id).await {
+        if let Some(data) = fmp4_cache.get(idx as usize, id).await {
             return Some(data.clone());
         }
 
@@ -356,7 +356,7 @@ async fn handle_request_h2(
     // Handle other requests (existing code)
     let (status, data, content_type) = request_handler(
         req.method(),
-        req.uri().path(),
+        get_uri_parts(req.uri().path()),
         req.uri().query(),
         fmp4_cache,
         m3u8_cache,
@@ -399,15 +399,48 @@ async fn handle_request_h2(
     }
 }
 
+fn get_uri_parts(path: &str) -> Vec<&str> {
+    path.split('/').filter(|s| !s.is_empty()).collect()
+}
+
 async fn handle_request_h3(
     req: http::Request<()>,
     mut stream: RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     fmp4_cache: Arc<Fmp4Cache>,
     m3u8_cache: Arc<M3u8Cache>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = get_uri_parts(req.uri().path());
+
+    if path.len() > 1 && path[1] == "tail" {
+        let id = path[0].parse::<u64>()?;
+        if let Some(idx) = fmp4_cache.get_stream_idx(id).await {
+            if let Some(mut last) = fmp4_cache.last(idx) {
+                info!("{} [{}] last sequence is {}", id, idx, last);
+
+                stream
+                    .send_response(
+                        http::Response::builder()
+                            .status(StatusCode::OK)
+                            .body(())
+                            .unwrap(),
+                    )
+                    .await?;
+
+                loop {
+                    if let Some((data, _)) = get_part(fmp4_cache.clone(), idx, last).await {
+                        stream.send_data(data).await?;
+                        last += 1;
+                    } else {
+                        sleep(Duration::from_millis(5)).await;
+                    }
+                }
+            }
+        }
+    }
+
     let (status, data, content_type) = request_handler(
         req.method(),
-        req.uri().path(),
+        path,
         req.uri().query(),
         fmp4_cache,
         m3u8_cache,
@@ -454,7 +487,7 @@ async fn handle_request_h3(
 
 async fn request_handler(
     method: &Method,
-    path: &str,
+    path: Vec<&str>,
     query: Option<&str>,
     fmp4_cache: Arc<Fmp4Cache>,
     m3u8_cache: Arc<M3u8Cache>,
@@ -465,11 +498,10 @@ async fn request_handler(
     let res = match (method, path) {
         (&Method::OPTIONS, _) => (StatusCode::OK, None, None),
         (&Method::HEAD, path) => {
-            let keys: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-            if keys.is_empty() {
+            if path.is_empty() {
                 (StatusCode::NOT_FOUND, None, None)
-            } else if keys[1] == "stream.m3u8" {
-                let stream_id = keys[0].parse::<u64>()?;
+            } else if path[1] == "stream.m3u8" {
+                let stream_id = path[0].parse::<u64>()?;
                 if let Some(res) = m3u8_cache.last(stream_id).unwrap() {
                     (StatusCode::OK, None, None)
                 } else {
@@ -480,36 +512,34 @@ async fn request_handler(
             }
         }
         (&Method::GET, path) => {
-            let keys: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-
-            if keys.is_empty() {
+            if path.is_empty() {
                 (StatusCode::NOT_FOUND, None, None)
-            } else if keys[0] == "up" {
+            } else if path[0] == "up" {
                 (
                     StatusCode::OK,
                     Some((Bytes::from("OK"), 0)),
                     Some("text/plain".into()),
                 )
-            } else if keys[0] == "play" {
+            } else if path[0] == "play" {
                 let contents = include_str!("./public/index.html");
                 (
                     StatusCode::OK,
                     Some((Bytes::from(contents), 0)),
                     Some("text/html".into()),
                 )
-            } else if keys[0] == "hls.min.js" {
+            } else if path[0] == "hls.min.js" {
                 let contents = include_str!("./public/hls.min.js");
                 (
                     StatusCode::OK,
                     Some((Bytes::from(contents), 0)),
                     Some("text/javascript".into()),
                 )
-            } else if keys.len() > 1 {
-                let ct = detect_content_type(&keys[1]);
+            } else if path.len() > 1 {
+                let ct = detect_content_type(&path[1]);
                 if ct.is_empty() {
                     (StatusCode::NOT_FOUND, None, None)
                 } else {
-                    let stream_id = keys[0].parse::<u64>()?;
+                    let stream_id = path[0].parse::<u64>()?;
                     let mut params: HashMap<&str, &str> = HashMap::new();
                     let mut data: Option<(Bytes, u64)> = None;
                     let content_type = Some(ct.to_string());
@@ -538,30 +568,32 @@ async fn request_handler(
                                 data = Some(res)
                             }
                         }
-                    } else if keys[1] == "stream.m3u8" {
+                    } else if path[1] == "stream.m3u8" {
                         if let Some(res) = m3u8_cache.last(stream_id).unwrap() {
                             data = Some(res)
                         }
-                    } else if keys[1] == "last" {
+                    } else if path[1] == "last" {
                         if let Some(seq) = fmp4_cache.last(stream_id as usize) {
                             let b = Bytes::from(seq.to_string().into_bytes());
                             data = Some((b, 0))
                         }
-                    } else if keys[1].starts_with("s") {
-                        if let Some(id) = extract_id(&keys[1]) {
+                    } else if path[1].starts_with("s") {
+                        if let Some(id) = extract_id(&path[1]) {
                             if let Some(res) =
                                 get_seg(fmp4_cache.clone(), m3u8_cache.clone(), stream_id, id).await
                             {
                                 data = Some(res)
                             }
                         }
-                    } else if keys[1].starts_with("p") {
-                        if let Some(id) = extract_id(&keys[1]) {
-                            if let Some(res) = get_part(fmp4_cache.clone(), stream_id, id).await {
-                                data = Some(res)
+                    } else if path[1].starts_with("p") {
+                        if let Some(id) = extract_id(&path[1]) {
+                            if let Some(idx) = fmp4_cache.get_stream_idx(stream_id).await {
+                                if let Some(res) = get_part(fmp4_cache.clone(), idx, id).await {
+                                    data = Some(res)
+                                }
                             }
                         }
-                    } else if keys[1].starts_with("init.mp4") {
+                    } else if path[1].starts_with("init.mp4") {
                         if let Ok(d) = m3u8_cache.get_init(stream_id) {
                             data = Some((d, 0));
                         }
@@ -705,7 +737,7 @@ where
                                 if let Some(mut last) = fmp4_cache.last(id as usize) {
                                     info!("{} last sequence is {}", id, last);
                                     loop {
-                                        if let Some((data,_)) = get_part(fmp4_cache.clone(), id, last).await {
+                                        if let Some((data,_)) = get_part(fmp4_cache.clone(), id as usize, last).await {
                                             muxer
                                                 .write(
                                                     pid,
@@ -725,7 +757,7 @@ where
                                             }
                                             last += 1;
                                         } else {
-                                            sleep(Duration::from_millis(10)).await;
+                                            sleep(Duration::from_millis(1)).await;
                                         }
                                     }
                                 } else {
@@ -739,7 +771,7 @@ where
                         let (id, stream) = uni_stream?.unwrap();
 
                         let send = session.open_uni(id).await?;
-                        tokio::spawn( async move { log_result!(echo_stream(send, stream).await); });
+                        tokio::spawn( async move { log_reult!(echo_stream(send, stream).await); });
                     }
                     stream = session.accept_bi() => {
                         if let Some(server::AcceptedBi::BidiStream(_, stream)) = stream? {
