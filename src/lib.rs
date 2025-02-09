@@ -1,3 +1,4 @@
+use access_unit::chunk::LpChunkIter;
 use anyhow::{Context, Result};
 use bytes::{Bytes, BytesMut};
 use h3::server::RequestStream;
@@ -24,6 +25,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use tls_helpers::{load_certs_from_base64, load_keys_from_base64, tls_acceptor_from_base64};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -220,7 +222,7 @@ async fn handle_h3_connection(
 ) -> Result<()> {
     loop {
         match conn.accept().await {
-            Ok(Some((req, stream))) => {
+            Ok(Some((req, mut stream))) => {
                 let ext = req.extensions();
                 match req.method() {
                     &Method::CONNECT if ext.get::<Protocol>() == Some(&Protocol::WEB_TRANSPORT) => {
@@ -234,11 +236,50 @@ async fn handle_h3_connection(
                     _ => {
                         let m3u8_cache = Arc::clone(&m3u8_cache);
                         let fmp4_cache = Arc::clone(&fmp4_cache);
+
                         tokio::spawn(async move {
-                            if let Err(e) =
-                                handle_request_h3(req, stream, fmp4_cache, m3u8_cache).await
-                            {
-                                error!("handling request failed: {}", e);
+                            let path = get_uri_parts(req.uri().path());
+                            if path.len() > 1 && path[1] == "tail" {
+                                if let Ok(id) = path[0].parse::<u64>() {
+                                    if let Some(idx) = fmp4_cache.get_stream_idx(id).await {
+                                        if let Some(mut last) = fmp4_cache.last(idx) {
+                                            info!("{} [{}] last sequence is {}", id, idx, last);
+
+                                            if let Err(e) = stream
+                                                .send_response(
+                                                    http::Response::builder()
+                                                        .status(StatusCode::OK)
+                                                        .header("Stream-Id", id)
+                                                        .body(())
+                                                        .unwrap(),
+                                                )
+                                                .await
+                                            {
+                                                error!("error sending on stream: {}", e);
+                                            }
+
+                                            loop {
+                                                if let Some((data, _)) =
+                                                    get_part(fmp4_cache.clone(), idx, last).await
+                                                {
+                                                    if let Err(e) = stream.send_data(data).await {
+                                                        error!("error sending on stream: {}", e);
+                                                    };
+
+                                                    last += 1;
+                                                } else {
+                                                    sleep(Duration::from_millis(5)).await;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                if let Err(e) =
+                                    handle_request_h3(req, stream, fmp4_cache, m3u8_cache).await
+                                {
+                                    error!("handling request failed: {}", e);
+                                }
                             }
                         });
                     }
@@ -410,33 +451,6 @@ async fn handle_request_h3(
     m3u8_cache: Arc<M3u8Cache>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = get_uri_parts(req.uri().path());
-
-    if path.len() > 1 && path[1] == "tail" {
-        let id = path[0].parse::<u64>()?;
-        if let Some(idx) = fmp4_cache.get_stream_idx(id).await {
-            if let Some(mut last) = fmp4_cache.last(idx) {
-                info!("{} [{}] last sequence is {}", id, idx, last);
-
-                stream
-                    .send_response(
-                        http::Response::builder()
-                            .status(StatusCode::OK)
-                            .body(())
-                            .unwrap(),
-                    )
-                    .await?;
-
-                loop {
-                    if let Some((data, _)) = get_part(fmp4_cache.clone(), idx, last).await {
-                        stream.send_data(data).await?;
-                        last += 1;
-                    } else {
-                        sleep(Duration::from_millis(5)).await;
-                    }
-                }
-            }
-        }
-    }
 
     let (status, data, content_type) = request_handler(
         req.method(),
