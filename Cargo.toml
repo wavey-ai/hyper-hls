@@ -1,2 +1,2 @@
 [workspace]
-members = ["web-service", "hls"]
+members = ["web-service", "hls", "chunks"]

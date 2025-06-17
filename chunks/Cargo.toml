@@ -1,0 +1,23 @@
+[package]
+name = "chunks"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+web-service = { path = "../web-service/" }
+env_logger = "0.11.0"
+tokio = { version = "1.45", features = ["full"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
+structopt = "0.3"
+bytes = "1.5"
+playlists = { git = "ssh://git@github.com/wavey-ai/playlists.git" }
+async-trait = "0.1.88"
+http = "1.3.1"
+regex = "1.11.1"
+h3 = { git = "https://github.com/hyperium/h3.git" }
+h3-quinn = { git = "https://github.com/hyperium/h3.git", features = [
+  "datagram",
+] }
+h3-webtransport = { git = "https://github.com/hyperium/h3.git" }
+h3-datagram = { git = "https://github.com/hyperium/h3.git" }

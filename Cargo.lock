@@ -310,6 +310,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "env_logger",
+ "h3",
+ "h3-datagram",
+ "h3-quinn",
+ "h3-webtransport",
+ "http",
+ "playlists",
+ "regex",
+ "structopt",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "web-service",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
