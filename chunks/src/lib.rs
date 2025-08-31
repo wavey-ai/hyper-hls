@@ -96,6 +96,21 @@ impl ChunkHandler {
     async fn get_part(&self, idx: u64, part: usize) -> Option<(Bytes, u64)> {
         self.cache.get(idx as usize, part).await
     }
+    
+    async fn get_part_with_blocking(&self, idx: u64, part: usize) -> Option<(Bytes, u64)> {
+        let to = Duration::from_secs(3);
+        let iv = Duration::from_millis(3);
+        timeout(to, async {
+            loop {
+                if let Some(d) = self.cache.get(idx as usize, part).await {
+                    return Some(d);
+                }
+                sleep(iv).await;
+            }
+        })
+        .await
+        .ok()?
+    }
 }
 #[async_trait]
 impl RequestHandler for ChunkHandler {
@@ -128,7 +143,9 @@ impl RequestHandler for ChunkHandler {
                 if file.starts_with('p') {
                     if let Some(id) = Self::extract_id(file) {
                         if let Some(idx) = self.cache.get_stream_idx(sid).await {
-                            if let Some(d) = self.get_part(idx as u64, id).await {
+                            let data = 
+                                self.get_part_with_blocking(idx as u64, id).await; 
+                            if let Some(d) = data {
                                 Ok(HandlerResponse {
                                     status: StatusCode::OK,
                                     body: Some(d.0),
